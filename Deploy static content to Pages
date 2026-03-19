@@ -1,0 +1,54 @@
+n:
+  # mainブランチにプッシュ（アップロード）されたときに実行
+  push:
+    branches: ["main"]
+
+  # 手動でも実行できるようにする
+  workflow_dispatch:
+
+# 権限の設定
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 複数同時に実行されないようにする
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  # デプロイジョブ
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリの取得
+        uses: actions/checkout@v4
+        
+      - name: Node.jsのセットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          
+      - name: パッケージのインストール
+        run: npm install
+        
+      - name: アプリのビルド (変換)
+        run: npm run build
+        
+      - name: Pagesの設定
+        uses: actions/configure-pages@v4
+        
+      - name: デプロイ用ファイルのアップロード
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # distフォルダ（ビルド後のファイル）をアップロード
+          path: './dist'
+          
+      - name: GitHub Pagesへのデプロイ
+        id: deployment
+        uses: actions/deploy-pages@v4
