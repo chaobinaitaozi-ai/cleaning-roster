@@ -95,31 +95,26 @@ export const generateRoster = (staffList, year, month) => {
         };
 
         if (N > 0) {
-            // パターン: 1Fトイレ(0) -> 1F給湯室(1) -> 休み(2) -> 2Fトイレ(3) -> 2F給湯室(4) -> 休み(5)
-            // という6週のサイクルを基本とする。 Nが6より大きい場合は残りが追加の「休み」となる。
-            const cycleLength = Math.max(N, 6);
+            const duties = ['1Fトイレ', '1F給湯室', '2Fトイレ', '2F給湯室'];
 
-            // 週ごとのグローバルなズレ幅
-            const offset = week.globalWeekIndex % cycleLength;
-            const adjustedOffset = offset < 0 ? offset + cycleLength : offset;
+            if (N >= 4) {
+                // Nが4人以上いれば、全員できれいにローテーションを回す
+                activeStaff.forEach((staff, index) => {
+                    let pos = (index + week.globalWeekIndex) % N;
+                    if (pos < 0) pos += N;
 
-            activeStaff.forEach((staff, index) => {
-                // 各スタッフがどの位置に来るかを計算
-                const pos = (index + adjustedOffset) % cycleLength;
-
-                if (pos === 0) {
-                    assignments['1Fトイレ'] = staff;
-                } else if (pos === 1) {
-                    assignments['1F給湯室'] = staff;
-                } else if (pos === 3) {
-                    assignments['2Fトイレ'] = staff;
-                } else if (pos === 4) {
-                    assignments['2F給湯室'] = staff;
-                } else {
-                    // pos が 2, 5, または 6以上の場合は「休み」
-                    assignments['休み'].push(staff);
-                }
-            });
+                    if (pos < 4) {
+                        assignments[duties[pos]] = staff;
+                    } else {
+                        assignments['休み'].push(staff);
+                    }
+                });
+            } else {
+                // 4人未満の場合は上から順番に埋める（一部の場所が空きになる）
+                activeStaff.forEach((staff, index) => {
+                    assignments[duties[index]] = staff;
+                });
+            }
         }
 
         if (N > 0) {

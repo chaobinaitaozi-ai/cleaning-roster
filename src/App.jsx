@@ -1,62 +1,108 @@
 import { useState, useEffect } from 'react';
 import StaffManager from './components/StaffManager';
 import RosterGenerator from './components/RosterGenerator';
+import { db } from './firebase'; // 作成したファイルから読み込む
+import { collection, onSnapshot, addDoc, updateDoc, doc, deleteDoc, writeBatch } from 'firebase/firestore';
 import './index.css';
-
-// 初期データの読み込みヘルパー
-const loadStaffFromStorage = () => {
-  const saved = localStorage.getItem('cleaningRosterStaff');
-  if (saved) {
-    try {
-      return JSON.parse(saved);
-    } catch (e) {
-      console.error('Failed to parse staff data', e);
-    }
-  }
-  return []; // 初期スタッフリストは空
-};
 
 function App() {
   const [activeTab, setActiveTab] = useState('roster');
-  const [staffList, setStaffList] = useState(loadStaffFromStorage());
+  const [staffList, setStaffList] = useState([]);
 
-  // スタッフリストが更新されたらLocalStorageに保存
+  // ① Firestoreからデータを定期的に読み込む（リアルタイム更新）
   useEffect(() => {
-    localStorage.setItem('cleaningRosterStaff', JSON.stringify(staffList));
-  }, [staffList]);
+    const staffCollectionRef = collection(db, 'staff');
+    const unsubscribe = onSnapshot(staffCollectionRef, (snapshot) => {
+      const staffData = snapshot.docs.map(doc => ({
+        ...doc.data(),
+        id: doc.id // Firestoreが自動生成したIDを使う
+      }));
+      setStaffList(staffData);
+    });
 
-  // スタッフ追加
-  const handleAddStaff = (name, department = 'システム部', status = '在籍中') => {
+    return () => unsubscribe(); // 不要になったら監視を解除
+  }, []);
+
+  // ② スタッフ追加（Firestoreに書き込み）
+  const handleAddStaff = async (name, department = 'システム部', status = '在籍中') => {
     if (!name.trim()) return;
-    const newStaff = { id: Date.now().toString(), name: name.trim(), department, status };
-    setStaffList([...staffList, newStaff]);
+    try {
+      await addDoc(collection(db, 'staff'), {
+        name: name.trim(),
+        department,
+        status,
+        createdAt: new Date()
+      });
+    } catch (error) {
+      console.error("追加エラー: ", error);
+      alert("追加に失敗しました");
+    }
   };
 
-  // スタッフ内容の更新（名前・部署・ステータス）
-  const handleUpdateStaff = (id, newName, newDepartment, newStatus) => {
-    setStaffList(staffList.map(staff =>
-      staff.id === id ? { ...staff, name: newName, department: newDepartment, status: newStatus } : staff
-    ));
+  // ③ スタッフ更新（Firestoreのデータを上書き）
+  const handleUpdateStaff = async (id, newName, newDepartment, newStatus) => {
+    try {
+      const staffDocRef = doc(db, 'staff', id);
+      await updateDoc(staffDocRef, {
+        name: newName,
+        department: newDepartment,
+        status: newStatus
+      });
+    } catch (error) {
+      console.error("更新エラー: ", error);
+      alert("更新に失敗しました");
+    }
   };
 
-  // スタッフ削除
-  const handleDeleteStaff = (id) => {
-    setStaffList(staffList.filter(staff => staff.id !== id));
+  // ④ スタッフ削除（Firestoreからデータを削除）
+  const handleDeleteStaff = async (id) => {
+    try {
+      const staffDocRef = doc(db, 'staff', id);
+      await deleteDoc(staffDocRef);
+    } catch (error) {
+      console.error("削除エラー: ", error);
+      alert("削除に失敗しました");
+    }
+  };
+
+  // ⑤ 一括インポート / 全削除（Firestore上で一括処理）
+  const handleImportStaff = async (importedData) => {
+    try {
+      const batch = writeBatch(db); // 複数の操作をまとめて行う機能
+      
+      // 今あるデータをすべて削除する
+      staffList.forEach(staff => {
+        const staffRef = doc(db, 'staff', staff.id);
+        batch.delete(staffRef);
+      });
+
+      // 新しいデータを追加する（全削除の場合は無視されます）
+      importedData.forEach(staff => {
+        const newStaffRef = doc(collection(db, 'staff'));
+        batch.set(newStaffRef, {
+          name: staff.name,
+          department: staff.department || 'システム部',
+          status: staff.status || '在籍中',
+          createdAt: new Date()
+        });
+      });
+
+      await batch.commit(); // 最後に一括で適用
+    } catch (error) {
+      console.error("データ処理エラー: ", error);
+      alert("データの処理に失敗しました");
+    }
   };
 
   return (
     <div className="app-container">
-      {/* Header */}
       <header className="app-header">
         <h1 className="app-title">
           <span>✨</span> 清掃当番表 作成アプリ
         </h1>
       </header>
 
-      {/* Main Content */}
       <main className="main-content">
-
-        {/* Navigation Tabs */}
         <div className="nav-tabs">
           <button
             className={`nav-tab ${activeTab === 'roster' ? 'active' : ''}`}
@@ -72,21 +118,19 @@ function App() {
           </button>
         </div>
 
-        {/* Tab Content */}
         {activeTab === 'staff' && (
           <StaffManager
             staffList={staffList}
             onAddStaff={handleAddStaff}
             onDeleteStaff={handleDeleteStaff}
             onUpdateStaff={handleUpdateStaff}
-            onImportStaff={setStaffList}
+            onImportStaff={handleImportStaff}
           />
         )}
 
         {activeTab === 'roster' && (
           <RosterGenerator staffList={staffList} />
         )}
-
       </main>
     </div>
   );
