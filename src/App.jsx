@@ -5,13 +5,16 @@ import { db } from './firebase'; // 作成したファイルから読み込む
 import { collection, onSnapshot, addDoc, updateDoc, doc, deleteDoc, writeBatch } from 'firebase/firestore';
 import './index.css';
 
+// ローカル起動時は 'dev_staff', 本番ビルド時は 'staff' に分ける
+const STAFF_COLLECTION_NAME = import.meta.env.DEV ? 'dev_staff' : 'staff';
+
 function App() {
   const [activeTab, setActiveTab] = useState('roster');
   const [staffList, setStaffList] = useState([]);
 
   // ① Firestoreからデータを定期的に読み込む（リアルタイム更新）
   useEffect(() => {
-    const staffCollectionRef = collection(db, 'staff');
+    const staffCollectionRef = collection(db, STAFF_COLLECTION_NAME);
     const unsubscribe = onSnapshot(staffCollectionRef, (snapshot) => {
       const staffData = snapshot.docs.map(doc => ({
         ...doc.data(),
@@ -24,13 +27,14 @@ function App() {
   }, []);
 
   // ② スタッフ追加（Firestoreに書き込み）
-  const handleAddStaff = async (name, department = 'システム部', status = '在籍中') => {
+  const handleAddStaff = async (name, department = 'システム部', status = '在籍中', rotationAnchors = []) => {
     if (!name.trim()) return;
     try {
-      await addDoc(collection(db, 'staff'), {
+      await addDoc(collection(db, STAFF_COLLECTION_NAME), {
         name: name.trim(),
         department,
         status,
+        rotationAnchors,
         createdAt: new Date()
       });
     } catch (error) {
@@ -40,13 +44,14 @@ function App() {
   };
 
   // ③ スタッフ更新（Firestoreのデータを上書き）
-  const handleUpdateStaff = async (id, newName, newDepartment, newStatus) => {
+  const handleUpdateStaff = async (id, newName, newDepartment, newStatus, rotationAnchors = []) => {
     try {
-      const staffDocRef = doc(db, 'staff', id);
+      const staffDocRef = doc(db, STAFF_COLLECTION_NAME, id);
       await updateDoc(staffDocRef, {
         name: newName,
         department: newDepartment,
-        status: newStatus
+        status: newStatus,
+        rotationAnchors
       });
     } catch (error) {
       console.error("更新エラー: ", error);
@@ -57,7 +62,7 @@ function App() {
   // ④ スタッフ削除（Firestoreからデータを削除）
   const handleDeleteStaff = async (id) => {
     try {
-      const staffDocRef = doc(db, 'staff', id);
+      const staffDocRef = doc(db, STAFF_COLLECTION_NAME, id);
       await deleteDoc(staffDocRef);
     } catch (error) {
       console.error("削除エラー: ", error);
@@ -65,34 +70,7 @@ function App() {
     }
   };
 
-  // ⑤ 一括インポート / 全削除（Firestore上で一括処理）
-  const handleImportStaff = async (importedData) => {
-    try {
-      const batch = writeBatch(db); // 複数の操作をまとめて行う機能
-      
-      // 今あるデータをすべて削除する
-      staffList.forEach(staff => {
-        const staffRef = doc(db, 'staff', staff.id);
-        batch.delete(staffRef);
-      });
 
-      // 新しいデータを追加する（全削除の場合は無視されます）
-      importedData.forEach(staff => {
-        const newStaffRef = doc(collection(db, 'staff'));
-        batch.set(newStaffRef, {
-          name: staff.name,
-          department: staff.department || 'システム部',
-          status: staff.status || '在籍中',
-          createdAt: new Date()
-        });
-      });
-
-      await batch.commit(); // 最後に一括で適用
-    } catch (error) {
-      console.error("データ処理エラー: ", error);
-      alert("データの処理に失敗しました");
-    }
-  };
 
   return (
     <div className="app-container">
@@ -124,7 +102,6 @@ function App() {
             onAddStaff={handleAddStaff}
             onDeleteStaff={handleDeleteStaff}
             onUpdateStaff={handleUpdateStaff}
-            onImportStaff={handleImportStaff}
           />
         )}
 
