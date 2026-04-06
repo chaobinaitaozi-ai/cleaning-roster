@@ -1,7 +1,7 @@
 // rosterLogic.js
 
-// 曜日や日時の計算用定数
 const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 // ローテーションの基準となる過去の固定日付（2024年1月1日 月曜日）
 const EPOCH_START = new Date('2024-01-01T00:00:00Z');
 
@@ -12,28 +12,31 @@ export const LOCATIONS = [
     '2F給湯室'
 ];
 
+export const ANCHOR_CHOICES = [
+    '1Fトイレ',
+    '1F給湯室',
+    '休み',
+    '2Fトイレ',
+    '2F給湯室'
+];
+
 /**
  * 指定された年月の週のリストを取得する
- * 月初を含む週の月曜日から、月末を含む週の日曜日まで
  */
 export const getMonthWeeks = (year, month) => {
     const weeks = [];
     const startOfMonth = new Date(year, month - 1, 1);
     const endOfMonth = new Date(year, month, 0);
 
-    // 月初の直前の月曜日を探す
     let currentMonday = new Date(startOfMonth);
     const dayOfWeek = currentMonday.getDay(); // 0(日)〜6(土)
     const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
     currentMonday.setDate(currentMonday.getDate() - diffToMonday);
 
-    // 現在の月曜日が月末日以前である限りループ
     while (currentMonday <= endOfMonth) {
         const endOfWeek = new Date(currentMonday);
         endOfWeek.setDate(endOfWeek.getDate() + 6); // 日曜日
 
-        // グローバルな週インデックス（基準日からの経過週数）
-        // getTimezoneOffsetなどの影響を避けるためUTCで日付の差を計算
         const utcCurrentMonday = Date.UTC(currentMonday.getFullYear(), currentMonday.getMonth(), currentMonday.getDate());
         const utcEpoch = Date.UTC(EPOCH_START.getFullYear(), EPOCH_START.getMonth(), EPOCH_START.getDate());
         const globalWeekIndex = Math.floor((utcCurrentMonday - utcEpoch) / MS_PER_WEEK);
@@ -44,7 +47,6 @@ export const getMonthWeeks = (year, month) => {
             globalWeekIndex,
         });
 
-        // 次の週へ
         currentMonday.setDate(currentMonday.getDate() + 7);
     }
 
@@ -52,124 +54,239 @@ export const getMonthWeeks = (year, month) => {
 };
 
 /**
- * スタッフリストと年月から当番表を生成する
+ * 安定版シミュレーションによるロスター生成
+ * 指定した日付（アンカー）を起点として、そこから順繰りにローテーションを進める（右にシフトしていく）
  */
 export const generateRoster = (staffList, year, month) => {
     const weeks = getMonthWeeks(year, month);
+    if (weeks.length === 0) return [];
 
-    // 「在籍中」またはステータスが未設定の人のみを当番の対象とする
-    const baseActiveStaff = staffList.filter(staff => !staff.status || staff.status === '在籍中');
-    // 休職中・時短勤務などの人は、最初から「休み」として扱う
-    const baseInactiveStaff = staffList.filter(staff => staff.status && staff.status !== '在籍中');
+    const maxWeekIndex = weeks[weeks.length - 1].globalWeekIndex;
+    if (maxWeekIndex < 0) return weeks.map(w => ({ ...w, assignments: {} }));
 
-    // 総務部と営業部の人数をカウント
-    const soumuCount = baseActiveStaff.filter(s => s.department === '総務部').length;
-    const eigyoCount = baseActiveStaff.filter(s => s.department === '営業部').length;
+    const allExpectedWeeks = [];
 
-    // 1人しかいない場合は常に休み（inactiveStaffに追加）
-    const alwaysOffStaff = [];
-    const activeStaff = baseActiveStaff.filter(s => {
-        if (s.department === '総務部' && soumuCount === 1) {
-            alwaysOffStaff.push(s);
-            return false;
-        }
-        if (s.department === '営業部' && eigyoCount === 1) {
-            alwaysOffStaff.push(s);
-            return false;
-        }
-        return true;
+    // シミュレーションの一貫性のためにID等で並び替えを固定
+    const sortedStaff = [...staffList].sort((a, b) => {
+        const aT = a.createdAt?.seconds || 0;
+        const bT = b.createdAt?.seconds || 0;
+        if (aT !== bT) return aT - bT;
+        return a.id.localeCompare(b.id);
     });
 
-    const inactiveStaff = [...baseInactiveStaff, ...alwaysOffStaff];
+    // シミュレーション用のキュー（IDの配列）
+    let rotationQueue = sortedStaff.map(s => s.id);
 
-    const N = activeStaff.length;
+    for (let wIdx = 0; wIdx <= maxWeekIndex; wIdx++) {
+        // 現在のシミュレーション週の開始日と終了日
+        const weekStartMs = Date.UTC(EPOCH_START.getFullYear(), EPOCH_START.getMonth(), EPOCH_START.getDate()) + wIdx * MS_PER_WEEK;
+        const weekEndMs = weekStartMs + 6 * MS_PER_DAY;
 
-    return weeks.map(week => {
-        // この週の割り当てを初期化
-        const assignments = {
-            '1Fトイレ': null,
-            '1F給湯室': null,
-            '2Fトイレ': null,
-            '2F給湯室': null,
-            '休み': [...inactiveStaff] // 当番外の人は常に休みに含める
-        };
+        let assignments = { '1Fトイレ': null, '1F給湯室': null, '2Fトイレ': null, '2F給湯室': null, '休み': [] };
 
-        if (N > 0) {
-            const duties = ['1Fトイレ', '1F給湯室', '2Fトイレ', '2F給湯室'];
+        // 稼働中のスタッフ抽出
+        const baseActiveStaff = staffList.filter(s => !s.status || s.status === '在籍中');
+        const inactiveStaff = staffList.filter(s => s.status && s.status !== '在籍中');
+        assignments['休み'] = [...inactiveStaff];
 
-            if (N >= 4) {
-                // Nが4人以上いれば、全員できれいにローテーションを回す
-                activeStaff.forEach((staff, index) => {
-                    let pos = (index + week.globalWeekIndex) % N;
-                    if (pos < 0) pos += N;
+        // --- 1. rotationQueue を最新の有効なスタッフのみに整理 ---
+        const activeIds = baseActiveStaff.map(s => s.id);
+        rotationQueue = rotationQueue.filter(id => activeIds.includes(id) && id !== null);
+        activeIds.forEach(id => {
+            if (!rotationQueue.includes(id)) {
+                rotationQueue.push(id);
+            }
+        });
 
-                    if (pos < 4) {
-                        assignments[duties[pos]] = staff;
-                    } else {
+        // --- 2. アンカー指定の適用 (スワップ) ---
+        // 同じ週に複数人のアンカーがあった場合でも順次スワップする
+        const thisWeekAnchors = [];
+        baseActiveStaff.forEach(staff => {
+            if (staff.rotationAnchors && Array.isArray(staff.rotationAnchors)) {
+                // 該当週の期間内に開始日が含まれるアンカーを探す
+                const matchingAnchor = staff.rotationAnchors.find(a => {
+                    const aTime = new Date(a.startDate).getTime();
+                    return aTime >= weekStartMs && aTime <= weekEndMs;
+                });
+                if (matchingAnchor) {
+                    thisWeekAnchors.push({ staffId: staff.id, location: matchingAnchor.location, startDate: matchingAnchor.startDate });
+                }
+            }
+        });
+
+        // アンカーを開始日順に適用することで公平性を保つ
+        thisWeekAnchors.sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
+
+        thisWeekAnchors.forEach(anchor => {
+            const targetIndex = ANCHOR_CHOICES.indexOf(anchor.location);
+            const currentIndex = rotationQueue.findIndex(id => id === anchor.staffId);
+
+            if (targetIndex !== -1 && currentIndex !== -1) {
+                // 配列の長さが targetIndex に満たない場合、null で埋める
+                while (rotationQueue.length <= targetIndex) {
+                    rotationQueue.push(null);
+                }
+                const temp = rotationQueue[targetIndex];
+                rotationQueue[targetIndex] = rotationQueue[currentIndex];
+                rotationQueue[currentIndex] = temp;
+            }
+        });
+
+        // --- 3. 割り当ての実行 ---
+        for (let i = 0; i < rotationQueue.length; i++) {
+            if (rotationQueue[i] !== null) {
+                const staff = staffList.find(s => s.id === rotationQueue[i]);
+                if (i < ANCHOR_CHOICES.length) {
+                    const choice = ANCHOR_CHOICES[i];
+                    if (choice === '休み') {
                         assignments['休み'].push(staff);
+                    } else {
+                        assignments[choice] = staff;
                     }
-                });
-            } else {
-                // 4人未満の場合は上から順番に埋める（一部の場所が空きになる）
-                activeStaff.forEach((staff, index) => {
-                    assignments[duties[index]] = staff;
-                });
+                } else {
+                    // Sequenceから溢れた人は休み
+                    assignments['休み'].push(staff);
+                }
             }
         }
 
-        if (N > 0) {
-            const enforceConstraintForDept = (dept) => {
-                const deptMembers = activeStaff.filter(s => s.department === dept);
-                if (deptMembers.length === 0) return;
+        // スワップで生じた空きを詰める
+        rotationQueue = rotationQueue.filter(id => id !== null);
 
-                const hasDeptMemberOnBreak = assignments['休み'].some(s => s.department === dept);
+        // --- 4. 部署制約の手動適用 ---
+        const activeStaffForConstraint = staffList.filter(s => rotationQueue.includes(s.id));
+        const enforceConstraintForDept = (dept) => {
+            const deptMembers = activeStaffForConstraint.filter(s => s.department === dept);
+            if (deptMembers.length === 0) return;
 
-                if (!hasDeptMemberOnBreak) {
-                    const duties = ['1Fトイレ', '1F給湯室', '2Fトイレ', '2F給湯室'];
-                    const dutyToFree = duties.find(duty => assignments[duty] && assignments[duty].department === dept);
+            const hasDeptMemberOnBreak = assignments['休み'].some(s => s && s.department === dept);
 
-                    if (dutyToFree) {
-                        const deptStaffToBreak = assignments[dutyToFree];
+            if (!hasDeptMemberOnBreak) {
+                const dutyToFree = LOCATIONS.find(duty => assignments[duty] && assignments[duty].department === dept);
 
-                        const eligibleBreakStaffIndex = assignments['休み'].findIndex(breakStaff => {
-                            if (inactiveStaff.includes(breakStaff)) return false; // 当番外の人は除外
-                            if (breakStaff.department === dept) return false; // 同部署は除外
-
-                            if (['総務部', '営業部'].includes(breakStaff.department)) {
-                                const activeBreakCount = assignments['休み'].filter(s =>
-                                    s.department === breakStaff.department && !inactiveStaff.includes(s)
-                                ).length;
-                                return activeBreakCount > 1; // 他の制約部署なら、その部署で2人以上休みの人がいる場合のみ交代可
-                            }
-                            return true; // システム部などは交代OK
-                        });
-
-                        if (eligibleBreakStaffIndex !== -1) {
-                            const staffToDuty = assignments['休み'][eligibleBreakStaffIndex];
-                            assignments[dutyToFree] = staffToDuty;
-                            assignments['休み'].splice(eligibleBreakStaffIndex, 1);
-                            assignments['休み'].push(deptStaffToBreak);
-                        } else {
-                            // 交代要員が見つからない場合でも、部署の「最低1人は休み」の条件を優先するため、
-                            // その人を休みにして役割を空き（null）にする
-                            assignments[dutyToFree] = null;
-                            assignments['休み'].push(deptStaffToBreak);
+                if (dutyToFree) {
+                    const deptStaffToBreak = assignments[dutyToFree];
+                    const eligibleBreakStaffIndex = assignments['休み'].findIndex(breakStaff => {
+                        if (!breakStaff) return false;
+                        if (inactiveStaff.some(s => s.id === breakStaff.id)) return false;
+                        if (breakStaff.department === dept) return false;
+                        if (['総務部', '営業部'].includes(breakStaff.department)) {
+                            const activeBreakCount = assignments['休み'].filter(s =>
+                                s && s.department === breakStaff.department && !inactiveStaff.some(is => is.id === s.id)
+                            ).length;
+                            return activeBreakCount > 1;
                         }
+                        return true;
+                    });
+
+                    if (eligibleBreakStaffIndex !== -1) {
+                        const staffToDuty = assignments['休み'][eligibleBreakStaffIndex];
+                        assignments[dutyToFree] = staffToDuty;
+                        assignments['休み'].splice(eligibleBreakStaffIndex, 1);
+                        assignments['休み'].push(deptStaffToBreak);
+                    } else {
+                        assignments[dutyToFree] = null;
+                        assignments['休み'].push(deptStaffToBreak);
                     }
                 }
-            };
+            }
+        };
+        enforceConstraintForDept('総務部');
+        enforceConstraintForDept('営業部');
 
-            enforceConstraintForDept('総務部');
-            enforceConstraintForDept('営業部');
+        // --- 5. 次週のためにキューを前進 (右シフト) ---
+        // 1Fトイレの人(index0)が、次週に1F給湯室(index1)に遷移するためには、
+        // 末尾の人が先頭に来る（全要素が1つ右に押し出される）必要がある。
+        if (rotationQueue.length > 0) {
+            rotationQueue.unshift(rotationQueue.pop());
         }
 
-        // YYYY/MM/DDの形でフォーマット
-        const formatDate = (date) => `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
+        allExpectedWeeks[wIdx] = { globalWeekIndex: wIdx, assignments };
+    }
 
+    const formatDate = (date) => `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
+
+    return weeks.map(week => {
+        const wIdx = week.globalWeekIndex;
         return {
             ...week,
-            assignments,
+            assignments: allExpectedWeeks[wIdx]?.assignments || {
+                '1Fトイレ': null, '1F給湯室': null, '2Fトイレ': null, '2F給湯室': null, '休み': []
+            },
             label: `${formatDate(week.start)} 〜 ${formatDate(week.end)}`
         };
     });
+};
+
+/**
+ * 月間カレンダー用に、日単位の当番配列を生成する（上書きデータ対応）
+ */
+export const generateDailyRoster = (staffList, year, month, overrides = {}) => {
+    const weeklyRoster = generateRoster(staffList, year, month);
+
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const dailyRoster = [];
+
+    const pad = (n) => n.toString().padStart(2, '0');
+
+    for (let day = 1; day <= daysInMonth; day++) {
+        const currentDate = new Date(year, month - 1, day);
+        const dateStr = `${year}-${pad(month)}-${pad(day)}`; // YYYY-MM-DD
+
+        const timeTarget = currentDate.getTime();
+        const weekData = weeklyRoster.find(w => timeTarget >= w.start.getTime() && timeTarget <= w.end.getTime());
+
+        let baseAssignments = {
+            '1Fトイレ': null, '1F給湯室': null, '2Fトイレ': null, '2F給湯室': null, '休み': []
+        };
+
+        if (weekData) {
+            baseAssignments = {
+                '1Fトイレ': weekData.assignments['1Fトイレ'],
+                '1F給湯室': weekData.assignments['1F給湯室'],
+                '2Fトイレ': weekData.assignments['2Fトイレ'],
+                '2F給湯室': weekData.assignments['2F給湯室'],
+                '休み': [...weekData.assignments['休み']]
+            };
+        }
+
+        const dayOverrides = overrides[dateStr] || {};
+
+        // 手動の上書き処理（カレンダー上で1日ごとにクリックして変更した分）
+        Object.keys(dayOverrides).forEach(loc => {
+            const overrideStaffId = dayOverrides[loc];
+            if (overrideStaffId) {
+                if (overrideStaffId === 'clear') {
+                    baseAssignments[loc] = null;
+                } else {
+                    const staff = staffList.find(s => String(s.id) === String(overrideStaffId));
+                    if (staff) {
+                        const previousStaff = baseAssignments[loc];
+                        baseAssignments[loc] = staff;
+
+                        baseAssignments['休み'] = baseAssignments['休み'].filter(s => s.id !== staff.id);
+
+                        if (previousStaff) {
+                            const isStillWorking = ['1Fトイレ', '1F給湯室', '2Fトイレ', '2F給湯室'].some(l =>
+                                baseAssignments[l] && baseAssignments[l].id === previousStaff.id
+                            );
+                            if (!isStillWorking && !baseAssignments['休み'].find(s => s.id === previousStaff.id)) {
+                                baseAssignments['休み'].push(previousStaff);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        dailyRoster.push({
+            date: currentDate,
+            dateStr: dateStr,
+            dayOfWeek: currentDate.getDay(),
+            assignments: baseAssignments,
+            isOverride: Object.keys(dayOverrides).length > 0
+        });
+    }
+
+    return dailyRoster;
 };
